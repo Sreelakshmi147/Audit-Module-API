@@ -245,6 +245,7 @@
     <Compile Include="Models\CustomerModel.cs" />
     <Compile Include="Models\LoginModel.cs" />
     <Compile Include="Models\ScopeModel.cs" />
+    <Compile Include="Models\SummaryIrregularityModel.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>

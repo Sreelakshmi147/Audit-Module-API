@@ -15,5 +15,9 @@ namespace WebAPIVP.Models
         public string FromDate { get; set; }
         public string ToDate { get; set; }
         public string CompletionDate { get; set; }
+
+        public byte[] POLICY_FILE { get; set; }
+
+        public string FILE_NAME { get; set; }
     }
 }

@@ -14,7 +14,8 @@ namespace WebAPIVP
 
             // ✅ ENABLE CORS FOR ANGULAR
             var cors = new EnableCorsAttribute(
-                origins: "http://10.5.101.213:8086,http://localhost:8086,https://gen.mactech.net.in/HOAudit/",
+                //origins: "http://10.5.101.213:8086,http://localhost:8086,https://gen.mactech.net.in/HOAudit/",
+                origins: "*",
                 headers: "*",
                 methods: "*"
             );

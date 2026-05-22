@@ -10,6 +10,9 @@ using System.Web.Http.Cors;
 using WebAPIVP.ConnectionString;
 using WebAPIVP.Models;
 using System.Configuration;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 
 
 namespace WebAPIVP.Controllers
@@ -1121,33 +1124,39 @@ WHERE AUDIT_ID = :auditId";
                 if (string.IsNullOrEmpty(extension) || extension.ToLower() != ".pdf")
                     return BadRequest("Only PDF files are allowed.");
 
-                string folderPath = HttpContext.Current.Server.MapPath("~/uploads/policy/");
-
-                // Create folder if it doesn't exist
-                if (!Directory.Exists(folderPath))
-                    Directory.CreateDirectory(folderPath);
-
-                // Unique file name
                 string newFileName = "AuditPolicy_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + extension;
 
-                string fullPath = Path.Combine(folderPath, newFileName);
+                byte[] fileBytes;
 
-                // Save file
-                file.SaveAs(fullPath);
+                using (BinaryReader br = new BinaryReader(file.InputStream))
+                {
+                    fileBytes = br.ReadBytes(file.ContentLength);
+                }
 
                 using (OracleConnection con = new OracleConnection(_connectionString))
                 {
                     string query = @"INSERT INTO MAAF_INT_AUDIT_POLICY
-                             (POLICY_ID, FILE_NAME, FILE_PATH, UPLOADED_DATE)
-                             VALUES
-                             (MAAF_INT_AUDIT_POLICY_SEQ.NEXTVAL, :fileName, :filePath, SYSDATE)";
+(
+    POLICY_ID,
+    FILE_NAME,
+    POLICY_FILE,
+    UPLOADED_DATE
+)
+VALUES
+(
+    MAAF_INT_AUDIT_POLICY_SEQ.NEXTVAL,
+    :fileName,
+    :policyFile,
+    SYSDATE
+)";
 
                     using (OracleCommand cmd = new OracleCommand(query, con))
                     {
                         cmd.BindByName = true;
 
                         cmd.Parameters.Add(":fileName", OracleDbType.Varchar2).Value = newFileName;
-                        cmd.Parameters.Add(":filePath", OracleDbType.Varchar2).Value = "/uploads/policy/" + newFileName;
+
+                        cmd.Parameters.Add(":policyFile", OracleDbType.Blob).Value = fileBytes;
 
                         con.Open();
                         cmd.ExecuteNonQuery();
@@ -1163,6 +1172,60 @@ WHERE AUDIT_ID = :auditId";
                 return InternalServerError(ex);
             }
         }
+
+        [HttpGet]
+        [Route("auditpolicy/view/{id}")]
+        public IHttpActionResult ViewPolicy(int id)
+        {
+            try
+            {
+                using (OracleConnection con = new OracleConnection(_connectionString))
+                {
+                    string query = @"SELECT FILE_NAME, POLICY_FILE
+                             FROM MAAF_INT_AUDIT_POLICY
+                             WHERE POLICY_ID = :id";
+
+                    using (OracleCommand cmd = new OracleCommand(query, con))
+                    {
+                        cmd.Parameters.Add(":id", OracleDbType.Int32).Value = id;
+
+                        con.Open();
+
+                        using (OracleDataReader dr = cmd.ExecuteReader())
+                        {
+                            if (dr.Read())
+                            {
+                                byte[] fileBytes = (byte[])dr["POLICY_FILE"];
+                                string fileName = dr["FILE_NAME"].ToString();
+
+                                HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK);
+
+                                response.Content = new ByteArrayContent(fileBytes);
+
+                                response.Content.Headers.ContentDisposition =
+                                    new System.Net.Http.Headers.ContentDispositionHeaderValue("inline")
+                                    {
+                                        FileName = fileName
+                                    };
+
+                                response.Content.Headers.ContentType =
+                                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/pdf");
+
+                                return ResponseMessage(response);
+                            }
+                        }
+                    }
+                }
+
+                return NotFound();
+            }
+            catch (Exception ex)
+            {
+                return InternalServerError(ex);
+            }
+        }
+
+
         [HttpGet]
         [Route("auditpolicy/list")]
         public IHttpActionResult GetPolicies()
@@ -1173,16 +1236,15 @@ WHERE AUDIT_ID = :auditId";
 
                 using (OracleConnection con = new OracleConnection(_connectionString))
                 {
-                    string query = @"SELECT FILE_NAME,
-                                    FILE_PATH,
-                                    UPLOADED_DATE
-                             FROM MAAF_INT_AUDIT_POLICY
-                             ORDER BY UPLOADED_DATE DESC";
+                    string query = @"
+            SELECT POLICY_ID,
+                   FILE_NAME,
+                   UPLOADED_DATE
+            FROM MAAF_INT_AUDIT_POLICY
+            ORDER BY UPLOADED_DATE DESC";
 
                     using (OracleCommand cmd = new OracleCommand(query, con))
                     {
-                        cmd.BindByName = true;
-
                         con.Open();
 
                         using (OracleDataReader reader = cmd.ExecuteReader())
@@ -1191,9 +1253,15 @@ WHERE AUDIT_ID = :auditId";
                             {
                                 policies.Add(new
                                 {
-                                    FileName = reader["FILE_NAME"].ToString(),
-                                    FilePath = reader["FILE_PATH"].ToString(),
-                                    UploadedDate = Convert.ToDateTime(reader["UPLOADED_DATE"])
+                                    PolicyId = reader["POLICY_ID"] != DBNull.Value
+                                        ? Convert.ToInt32(reader["POLICY_ID"])
+                                        : 0,
+
+                                    FileName = reader["FILE_NAME"]?.ToString() ?? "",
+
+                                    UploadedDate = reader["UPLOADED_DATE"] != DBNull.Value
+                                        ? Convert.ToDateTime(reader["UPLOADED_DATE"])
+                                        : (DateTime?)null
                                 });
                             }
                         }
@@ -1204,9 +1272,16 @@ WHERE AUDIT_ID = :auditId";
             }
             catch (Exception ex)
             {
-                return InternalServerError(ex);
+                return Ok(new
+                {
+                    success = false,
+                    message = ex.Message,
+                    details = ex.ToString()
+                });
             }
         }
+
+
         [HttpOptions]
         [Route("{*path}")]
         public IHttpActionResult Options()
@@ -2810,7 +2885,7 @@ SELECT
 FROM BLUEAUDITLAGDAYS d
 
 JOIN BRANCH_DETAIL bd
-ON bd.BRANCH_ID = d.BRANCH_ID
+ON bd.BRANCH_ID = d.BRANCH_I
 
 JOIN BRANCH_MASTER bm
 ON bm.BRANCH_ID = d.BRANCH_ID
@@ -3071,5 +3146,409 @@ ORDER BY bd.BRANCH_NAME";
                 return Ok(new { error = ex.Message });
             }
         }
+
+
+        [HttpGet]
+        [Route("getdocumentauditirregularities")]
+        public IHttpActionResult GetDocumentAuditIrregularities(
+    string fdate,
+    string tdate)
+        {
+            try
+            {
+                DataTable dt = new DataTable();
+
+                using (OracleConnection con =
+                    new OracleConnection(_connectionString))
+                {
+                    con.Open();
+
+                    string query = @"
+
+SELECT
+    'Document Audit Irregularities' CATEGORY,
+
+    NVL(SUM(HIGH_CNT),0) HIGH,
+
+    NVL(SUM(MEDIUM_CNT),0) MEDIUM,
+
+    NVL(SUM(LOW_CNT),0) LOW,
+
+    NVL(SUM(TOTAL_CNT),0) TOTAL
+
+FROM
+(
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END) HIGH_CNT,
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END) MEDIUM_CNT,
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END) LOW_CNT,
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+) TOTAL_CNT
+
+FROM TBL_DOC_LIVE_INVENTRY r
+
+JOIN TBL_DOC_AUDIT_ISSUES i
+ON r.ISSUE_TYP_ID = i.ISSUE_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE i.CLASS_ID = 1
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+UNION ALL
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.INV_NO || '-' || r.ISSUE_TYP_ID
+)
+
+FROM TBL_DOC_SETTLED_INVENTRY r
+
+JOIN TBL_DOC_AUDIT_ISSUES i
+ON r.ISSUE_TYP_ID = i.ISSUE_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE i.CLASS_ID = 2
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+UNION ALL
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.CUST_ID || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.CUST_ID || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN i.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.CUST_ID || '-' || r.ISSUE_TYP_ID
+END),
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.CUST_ID || '-' || r.ISSUE_TYP_ID
+)
+
+FROM TBL_DOC_ACTIVE_CUSTOMER r
+
+JOIN TBL_DOC_AUDIT_ISSUES i
+ON r.ISSUE_TYP_ID = i.ISSUE_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE i.CLASS_ID = 3
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+UNION ALL
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.QUE_ID
+)
+
+FROM TBL_DOC_MAINTAIN_REGISTER r
+
+JOIN TBL_DOC_AUDIT_CHECKLIST c
+ON r.QUE_ID = c.QUE_ID
+AND r.CLASS_ID = c.CLASS_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE c.CLASS_ID = 4
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+UNION ALL
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.QUE_ID
+)
+
+FROM TBL_DOC_DISPLAY_CERTIFICATE r
+
+JOIN TBL_DOC_AUDIT_CHECKLIST c
+ON r.QUE_ID = c.QUE_ID
+AND r.CLASS_ID = c.CLASS_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE c.CLASS_ID = 5
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+UNION ALL
+
+
+
+SELECT
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 1
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID = 2
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT CASE
+WHEN c.PRIORITY_ID IN (3,4)
+THEN r.AUDIT_ID || '-' || r.QUE_ID
+END),
+
+COUNT(DISTINCT
+r.AUDIT_ID || '-' || r.QUE_ID
+)
+
+FROM TBL_DOC_AUDIT_OTHERS r
+
+JOIN TBL_DOC_AUDIT_CHECKLIST c
+ON r.QUE_ID = c.QUE_ID
+AND r.CLASS_ID = c.CLASS_ID
+
+LEFT JOIN TBL_DOC_AUDIT_CHECK_MST m
+ON r.AUDIT_ID = m.AUDIT_ID
+
+WHERE c.CLASS_ID = 6
+
+AND
+(
+    TRUNC(r.TRA_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.BH_RECT_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+
+    OR
+
+    TRUNC(m.VALIDATE_DT)
+    BETWEEN TO_DATE(:fdate,'YYYY-MM-DD')
+    AND TO_DATE(:tdate,'YYYY-MM-DD')
+)
+
+)
+
+";
+
+                    using (OracleCommand cmd =
+                        new OracleCommand(query, con))
+                    {
+                        cmd.BindByName = false;
+
+                        for (int i = 0; i < 18; i++)
+                        {
+                            cmd.Parameters.Add(
+                                "fdate",
+                                OracleDbType.Varchar2
+                            ).Value = fdate;
+
+                            cmd.Parameters.Add(
+                                "tdate",
+                                OracleDbType.Varchar2
+                            ).Value = tdate;
+                        }
+
+                        using (OracleDataAdapter da =
+                            new OracleDataAdapter(cmd))
+                        {
+                            da.Fill(dt);
+                        }
+                    }
+                }
+
+                return Ok(dt);
+            }
+            catch (Exception ex)
+            {
+                return Ok(new
+                {
+                    error = ex.Message
+                });
+            }
+        }
     }
 }
+
+
+
+
+
+
